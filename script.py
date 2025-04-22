@@ -7,43 +7,35 @@ from typing import List, Tuple, Optional
 
 def split_args(s: str) -> List[str]:
     """
-    Split a function-call argument string on top-level commas only
-    (ignores commas inside (), [] or string literals).
+    Split on top‐level commas only (ignores commas inside (), [] or string literals).
     """
     parts: List[str] = []
     cur = ''
-    paren = 0
-    bracket = 0
+    paren = bracket = 0
     in_str: Optional[str] = None
     escape = False
 
     for c in s:
         if escape:
-            cur += c
-            escape = False
-            continue
+            cur += c; escape = False; continue
         if c == '\\':
-            cur += c
-            escape = True
-            continue
-
+            cur += c; escape = True; continue
         if in_str:
             cur += c
-            if c == in_str:
-                in_str = None
+            if c == in_str: in_str = None
             continue
-
         if c in ('"', "'"):
-            in_str = c
-            cur += c
-            continue
+            in_str = c; cur += c; continue
 
-        if c == '(': paren += 1
-        elif c == ')': paren -= 1
-        elif c == '[': bracket += 1
-        elif c == ']': bracket -= 1
+        if c == '(':
+            paren += 1
+        elif c == ')':
+            paren -= 1
+        elif c == '[':
+            bracket += 1
+        elif c == ']':
+            bracket -= 1
 
-        # top-level comma splits arguments
         if c == ',' and paren == 0 and bracket == 0:
             parts.append(cur.strip())
             cur = ''
@@ -57,8 +49,8 @@ def split_args(s: str) -> List[str]:
 
 def extract_call_args(content: str, start: int) -> Tuple[str, int]:
     """
-    From content[start:], find substring up to matching ')' at depth 0.
-    Returns (args_str, index_of_closing_paren).
+    From content[start:], read until the matching ')' at depth 0.
+    Returns (args_str_without_parens, index_of_closing_paren).
     """
     depth = 1
     in_str: Optional[str] = None
@@ -83,186 +75,221 @@ def extract_call_args(content: str, start: int) -> Tuple[str, int]:
     return content[start:i-1], i-1
 
 
-def find_html_aliases(content: str) -> List[str]:
-    pattern = re.compile(r"use\s+Collective\\Html\\HtmlFacade(?:\s+as\s+(\w+))?;", flags=re.IGNORECASE)
-    aliases: List[str] = []
-    for m in pattern.finditer(content):
-        alias = m.group(1) if m.group(1) else "HtmlFacade"
-        aliases.append(alias)
-    return aliases
-
-
 def convert_attributes(array_str: str) -> str:
+    """
+    "[ 'class'=>'btn', 'id'=>'x' ]"    → "->class('btn')->id('x')"
+    "array('readonly'=>'readonly')"    → "->attribute('readonly','readonly')"
+    """
     s = array_str.strip()
-    if s.startswith('[') and s.endswith(']'):
+    if s.startswith('array(') and s.endswith(')'):
+        s = s[len('array('):-1]
+    elif s.startswith('[') and s.endswith(']'):
         s = s[1:-1]
-    parts = re.findall(r"(['\"])(\w+)\1\s*=>\s*(['\"])(.*?)\3", s)
+    else:
+        return ''
+
+    parts = re.findall(r"(['\"])(.+?)\1\s*=>\s*(['\"])(.*?)\3", s)
     chain = ''
     for _, key, _, val in parts:
-        chain += f"->{key}('{val}')"
+        if key in ('class', 'id', 'name', 'type', 'value', 'placeholder'):
+            chain += f"->{key}('{val}')"
+        else:
+            chain += f"->attribute('{key}', '{val}')"
     return chain
 
 
-def replace_form_open(m: re.Match) -> str:
-    args = m.group(1).strip()
-    if args.startswith('[') and args.endswith(']'):
-        return f"html()->form(){convert_attributes(args)}->open()"
-    if args:
-        return f"html()->form()->open({args})"
-    return "html()->form()->open()"
-
-
-def replace_form_close(_: re.Match) -> str:
-    return "html()->form()->close()"
-
-
-def replace_simple_field(method: str, rep: str, content: str) -> str:
-    pat = rf"Form::{method}\(\s*([^,]+)\s*,\s*([^,\)]+)(?:\s*,\s*(\[[^\]]+\]))?\s*\)"
-    def r(m: re.Match) -> str:
-        a1, a2, at = m.group(1), m.group(2), m.group(3)
-        res = f"html()->{rep}({a1}, {a2})"
+def map_form_method_to_html(method: str, parts: List[str]) -> str:
+    """
+    Convert Form::<method>(...) → html()-><method>(...)->...attributes
+    """
+    if method == 'select':
+        name = parts[0] if len(parts) > 0 else "''"
+        opts = parts[1] if len(parts) > 1 else "[]"
+        sel  = parts[2] if len(parts) > 2 else None
+        at   = parts[3] if len(parts) > 3 else None
+        code = f"html()->select({name}, {opts}"
+        if sel:
+            code += f", {sel}"
+        code += ")"
         if at:
-            res += convert_attributes(at)
-        return res
-    return re.sub(pat, r, content, flags=re.DOTALL)
+            code += convert_attributes(at)
+        return code
 
-
-def replace_single_arg_field(method: str, rep: str, content: str) -> str:
-    pat = rf"Form::{method}\(\s*([^,\)]+)(?:\s*,\s*(\[[^\]]+\]))?\s*\)"
-    def r(m: re.Match) -> str:
-        n, at = m.group(1), m.group(2)
-        res = f"html()->{rep}({n})"
+    if method in ('radio', 'checkbox'):
+        name = parts[0] if len(parts)>0 else "''"
+        val  = parts[1] if len(parts)>1 else "''"
+        ck   = parts[2] if len(parts)>2 else 'false'
+        at   = parts[3] if len(parts)>3 else None
+        code = f"html()->{method}({name}, {val}, {ck})"
         if at:
-            res += convert_attributes(at)
-        return res
-    return re.sub(pat, r, content, flags=re.DOTALL)
+            code += convert_attributes(at)
+        return code
+
+    if method in ('textarea','number','email','hidden','search','file','date','time','url'):
+        name = parts[0] if len(parts)>0 else "''"
+        val  = parts[1] if len(parts)>1 else None
+        at   = parts[2] if len(parts)>2 else None
+        code = f"html()->{method}({name}"
+        if val is not None:
+            code += f", {val}"
+        code += ")"
+        if at:
+            code += convert_attributes(at)
+        return code
+
+    if method in ('text','password'):
+        name = parts[0] if len(parts)>0 else "''"
+        val = at = None
+        if len(parts) > 1:
+            if re.match(r"^\s*(?:array\(|\[)", parts[1]):
+                at = parts[1]
+            else:
+                val = parts[1]
+        if len(parts) > 2:
+            at = parts[2]
+        code = f"html()->{method}({name}"
+        if val is not None:
+            code += f", {val}"
+        code += ")"
+        if at:
+            code += convert_attributes(at)
+        return code
+
+    if method in ('submit','button'):
+        val = parts[0] if len(parts)>0 else "''"
+        at  = parts[1] if len(parts)>1 else None
+        code = f"html()->{method}({val})"
+        if at:
+            code += convert_attributes(at)
+        return code
+
+    if method == 'open':
+        arg = parts[0] if len(parts)>0 else ''
+        if re.match(r"^\s*(?:array\(|\[)", arg):
+            return f"html()->form(){convert_attributes(arg)}->open()"
+        return f"html()->form()->open({arg})"
+
+    if method == 'close':
+        return "html()->form()->close()"
+
+    # fallback
+    args = ", ".join(parts)
+    return f"html()->{method}({args})"
 
 
-def replace_form_select(content: str) -> str:
-    pat = r"Form::select\(\s*([^,]+)\s*,\s*([^,]+)(?:\s*,\s*([^,\)]+))?(?:\s*,\s*(\[[^\]]+\]))?\s*\)"
-    def r(m: re.Match) -> str:
-        n, o, s, at = m.group(1), m.group(2), m.group(3), m.group(4)
-        res = f"html()->select({n}, {o})"
-        if s: res += f"->selected({s})"
-        if at: res += convert_attributes(at)
-        return res
-    return re.sub(pat, r, content, flags=re.DOTALL)
-
-
-def replace_form_radio(content: str) -> str:
-    pat = r"Form::radio\(\s*([^,]+)\s*,\s*([^,]+)\s*,\s*([^,\)]+)(?:\s*,\s*(\[[^\]]+\]))?\s*\)"
-    def r(m: re.Match) -> str:
-        n, v, ck, at = m.group(1), m.group(2), m.group(3), m.group(4)
-        res = f"html()->radio({n}, {v}, {ck})"
-        if at: res += convert_attributes(at)
-        return res
-    return re.sub(pat, r, content, flags=re.DOTALL)
-
-
-def replace_form_checkbox(content: str) -> str:
-    pat = r"Form::checkbox\(\s*([^,]+)\s*,\s*([^,]+)\s*,\s*([^,\)]+)(?:\s*,\s*(\[[^\]]+\]))?\s*\)"
-    def r(m: re.Match) -> str:
-        n, v, ck, at = m.group(1), m.group(2), m.group(3), m.group(4)
-        res = f"html()->checkbox({n}, {v}, {ck})"
-        if at: res += convert_attributes(at)
-        return res
-    return re.sub(pat, r, content, flags=re.DOTALL)
-
-
-def replace_form_textarea(content: str) -> str:
-    pat = r"Form::textarea\(\s*([^,]+)\s*,\s*([^,]+)(?:\s*,\s*(\[[^\]]+\]))?\s*\)"
-    def r(m: re.Match) -> str:
-        n, v, at = m.group(1), m.group(2), m.group(3)
-        res = f"html()->textarea({n}, {v})"
-        if at: res += convert_attributes(at)
-        return res
-    return re.sub(pat, r, content, flags=re.DOTALL)
-
-
-def replace_form_number(content: str) -> str:
-    pat = r"Form::number\(\s*([^,]+)\s*,\s*([^,]+)(?:\s*,\s*(\[[^\]]+\]))?\s*\)"
-    def r(m: re.Match) -> str:
-        n, v, at = m.group(1), m.group(2), m.group(3)
-        res = f"html()->number({n}, {v})"
-        if at: res += convert_attributes(at)
-        return res
-    return re.sub(pat, r, content, flags=re.DOTALL)
-
-
-def extract_and_replace_calls(content: str, alias: str, method: str) -> str:
-    call = f"{alias}::{method}"
+def replace_all_form_calls(content: str) -> str:
     out = ''
     idx = 0
     while True:
-        pos = content.find(call + '(', idx)
+        pos = content.find('Form::', idx)
         if pos == -1:
             out += content[idx:]
             break
         out += content[idx:pos]
-        args_start = pos + len(call) + 1
-        args_str, args_end = extract_call_args(content, args_start)
+        m = re.match(r'Form::(\w+)', content[pos:])
+        if not m:
+            idx = pos + len('Form::')
+            continue
+        method = m.group(1)
+        start = pos + m.end()
+        while start < len(content) and content[start].isspace():
+            start += 1
+        if start >= len(content) or content[start] != '(':
+            idx = pos + m.end()
+            continue
+        args_str, end = extract_call_args(content, start+1)
         parts = split_args(args_str)
-        if method == 'linkRoute':
-            route_name = parts[0] if len(parts) > 0 else "''"
-            params     = parts[1] if len(parts) > 1 else "[]"
-            attrs      = parts[2] if len(parts) > 2 else "[]"
-            title      = parts[3] if len(parts) > 3 else "''"
-            code = f"html()->a()->route({route_name}, {params})"
-            code += convert_attributes(attrs) if attrs.startswith('[') else f"->attributes({attrs})"
-            code += f"->html({title})"
-        else:
-            href  = parts[0] if len(parts) > 0 else "''"
-            title = parts[1] if len(parts) > 1 else "''"
-            attrs = parts[2] if len(parts) > 2 else ''
-            code = f"html()->a({href}, {title})"
-            if attrs.startswith('['):
-                code += convert_attributes(attrs)
-            elif attrs:
-                code += f"->attributes({attrs})"
-        out += code
-        idx = args_end + 1
+        out += map_form_method_to_html(method, parts)
+        idx = end + 1
     return out
 
 
-def replace_alias_generic(content: str, alias: str) -> str:
-    pattern = rf"{alias}::(\w+)\((.*?)\)"
-    def repl(m: re.Match) -> str:
-        method, args = m.group(1), m.group(2)
-        if method in ('link', 'linkRoute'):
-            return m.group(0)
-        return f"html()->{method}({args})"
-    return re.sub(pattern, repl, content, flags=re.DOTALL)
+def map_html_method_to_html(method: str, parts: List[str]) -> str:
+    """
+    Convert Html::link(...) and Html::linkRoute(...) → html()->a()...
+    """
+    if method == 'linkRoute':
+        name   = parts[0] if len(parts)>0 else "''"
+        title  = parts[1] if len(parts)>1 else "''"
+        params = parts[2] if len(parts)>2 else "[]"
+        attrs  = parts[3] if len(parts)>3 else None
+        escape = parts[5] if len(parts)>5 else 'true'
+        code = f"html()->a()->route({name}, {params})"
+        if escape.strip().lower() in ('false','0'):
+            code += f"->html({title})"
+        else:
+            code += f"->text({title})"
+        if attrs:
+            code += convert_attributes(attrs)
+        return code
+
+    if method == 'link':
+        href   = parts[0] if len(parts)>0 else "''"
+        title  = parts[1] if len(parts)>1 else "''"
+        attrs  = parts[2] if len(parts)>2 else None
+        escape = parts[3] if len(parts)>3 else 'true'
+        code = f"html()->a({href}, {title})"
+        if escape.strip().lower() in ('false','0'):
+            code = code.rsplit(',',1)[0] + ')'  # remove auto-escaped text
+            code += f"->html({title})"
+        if attrs:
+            code += convert_attributes(attrs)
+        return code
+
+    # fallback
+    args = ", ".join(parts)
+    return f"Html::{method}({args})"
+
+
+def replace_all_html_calls(content: str) -> str:
+    out = ''
+    idx = 0
+    while True:
+        pos = content.find('Html::', idx)
+        if pos == -1:
+            out += content[idx:]
+            break
+        out += content[idx:pos]
+        m = re.match(r'Html::(\w+)', content[pos:])
+        if not m:
+            idx = pos + len('Html::')
+            continue
+        method = m.group(1)
+        start = pos + m.end()
+        while start < len(content) and content[start].isspace():
+            start += 1
+        if start >= len(content) or content[start] != '(':
+            idx = pos + m.end()
+            continue
+        args_str, end = extract_call_args(content, start+1)
+        parts = split_args(args_str)
+        out += map_html_method_to_html(method, parts)
+        idx = end + 1
+    return out
 
 
 def convert_code(content: str) -> str:
-    for alias in find_html_aliases(content):
-        content = extract_and_replace_calls(content, alias, 'linkRoute')
-        content = extract_and_replace_calls(content, alias, 'link')
-        content = replace_alias_generic(content, alias)
-
-    content = re.sub(r"use\s+Collective\\Html\\HtmlFacade(?:\s+as\s+\w+)?;\s*\n", "", content, flags=re.IGNORECASE)
-    content = re.sub(r"Form::open\((.*?)\)", replace_form_open, content, flags=re.DOTALL)
-    content = re.sub(r"Form::close\(\)", replace_form_close, content)
-    content = replace_simple_field('hidden', 'hidden', content)
-    content = replace_simple_field('email', 'email', content)
-    content = replace_single_arg_field('password', 'password', content)
-    content = replace_single_arg_field('submit', 'submit', content)
-    content = replace_form_select(content)
-    content = replace_form_radio(content)
-    content = replace_form_checkbox(content)
-    content = replace_single_arg_field('button', 'button', content)
-    content = replace_form_textarea(content)
-    content = replace_form_number(content)
-    for f in ('file', 'date', 'time', 'url', 'search'):
-        content = replace_single_arg_field(f, f, content)
-
+    # normalize "\Form::" → "Form::" and remove old import
+    content = content.replace('\\Form::', 'Form::')
+    content = re.sub(
+        r"use\s+Collective\\Html\\HtmlFacade(?:\s+as\s+\w+)?;\s*\n",
+        "",
+        content,
+        flags=re.IGNORECASE
+    )
+    # Form:: → html()
+    content = replace_all_form_calls(content)
+    # Html:: → html()->a() / route()
+    content = replace_all_html_calls(content)
     return content
 
 
 def process_directory(root_dir: str) -> None:
-    php_files = [os.path.join(d, f)
-                 for d, _, fs in os.walk(root_dir)
-                 for f in fs if f.endswith(('.php', '.blade.php'))]
+    php_files = [
+        os.path.join(d, f)
+        for d, _, fs in os.walk(root_dir)
+        for f in fs if f.endswith(('.php', '.blade.php'))
+    ]
     total = len(php_files)
     processed = 0
     for path in php_files:
@@ -283,7 +310,9 @@ def process_directory(root_dir: str) -> None:
 
         processed += 1
         print(f"Обработано: {processed}/{total}\r", end='')
+
     print("\nГотово.")
+
 
 if __name__ == '__main__':
     target = sys.argv[1] if len(sys.argv) > 1 else os.getcwd()
